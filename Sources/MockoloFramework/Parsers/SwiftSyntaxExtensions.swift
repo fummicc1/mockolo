@@ -11,7 +11,6 @@ import SwiftSyntax
 #endif
 #if canImport(SwiftParser)
 import SwiftParser
-#endif
 
 extension Parser {
     public static func parse(_ fileData: Data, path: String) -> SourceFileSyntax {
@@ -29,6 +28,27 @@ extension Parser {
         return parse(fileData, path: path)
     }
 }
+
+#elseif canImport(SwiftSyntaxParser)
+import SwiftSyntaxParser
+
+extension SyntaxParser {
+    public static func parse(_ fileData: Data, path: String) throws -> SourceFileSyntax {
+        // Avoid using `String(contentsOf:)` because it creates a wrapped NSString.
+        let source = fileData.withUnsafeBytes { buf in
+            return String(decoding: buf.bindMemory(to: UInt8.self), as: UTF8.self)
+        }
+        return try parse(source: source, filenameForDiagnostics: path)
+    }
+
+    public static func parse(_ path: String) throws -> SourceFileSyntax {
+        guard let fileData = FileManager.default.contents(atPath: path) else {
+            fatalError("Retrieving contents of \(path) failed")
+        }
+        return try parse(fileData, path: path)
+    }
+}
+#endif
 
 extension SyntaxProtocol {
     var offset: Int64 {
@@ -248,7 +268,12 @@ extension IfConfigDeclSyntax {
         var name = ""
         for cl in self.clauses {
             if let desc = cl.condition?.description {
-                if let list = cl.elements?.as(MemberDeclListSyntax.self) {
+#if swift(>=5.8)
+                let list = cl.elements?.as(MemberDeclListSyntax.self)
+#else
+                let list = cl.elements.as(MemberDeclListSyntax.self)
+#endif
+                if let list = list {
                     name = desc
                     for element in list {
                         if let (item, attr, initFlag) = element.transformToModel(with: encloserAcl, declType: declType, metadata: metadata, processed: processed) {
@@ -483,7 +508,7 @@ extension InitializerDeclSyntax {
     func model(with acl: String, declType: DeclType, processed: Bool) -> Model {
         let requiredInit = isRequired(with: declType)
 
-        let params = self.signature.input.parameterList.compactMap { $0.model(inInit: true, declType: declType) }
+        let params = self.parameterList.compactMap { $0.model(inInit: true, declType: declType) }
         let genericTypeParams = self.genericParameterClause?.genericParameterList.compactMap { $0.model(inInit: true) } ?? []
         let genericWhereClause = self.genericWhereClause?.description
 
@@ -495,7 +520,7 @@ extension InitializerDeclSyntax {
                            genericTypeParams: genericTypeParams,
                            genericWhereClause: genericWhereClause,
                            params: params,
-                           throwsOrRethrows: self.signature.throwsOrRethrowsKeyword?.text,
+                           throwsOrRethrows: self.throwsOrRethrowsKeyword?.text,
                            asyncOrReasync: nil, // "init() async" is not supperted in SwiftSyntax
                            isStatic: false,
                            offset: self.offset,
@@ -580,16 +605,23 @@ extension AssociatedtypeDeclSyntax {
 
 extension TypealiasDeclSyntax {
     func model(with acl: String, declType: DeclType, overrides: [String: String]?, processed: Bool) -> Model {
-        return TypeAliasModel(name: self.identifier.text,
-                              typeName: self.initializer.value.description,
-                              acl: acl,
-                              encloserType: declType,
-                              overrideTypes: overrides,
-                              offset: self.offset,
-                              length: self.length,
-                              modelDescription: self.description,
-                              useDescription: true,
-                              processed: processed)
+#if swift(>=5.8)
+        let typeName = self.initializer.value.description
+#else
+        let typeName = self.initializer?.value.description ?? ""
+#endif
+        return TypeAliasModel(
+            name: self.identifier.text,
+            typeName: typeName,
+            acl: acl,
+            encloserType: declType,
+            overrideTypes: overrides,
+            offset: self.offset,
+            length: self.length,
+            modelDescription: self.description,
+            useDescription: true,
+            processed: processed
+        )
     }
 }
 
@@ -605,7 +637,9 @@ final class EntityVisitor: SyntaxVisitor {
         self.fileMacro = fileMacro ?? ""
         self.path = path
         self.declType = declType
+#if swift(>=5.8)
         super.init(viewMode: .sourceAccurate)
+#endif
     }
 
     override func visit(_ node: ProtocolDeclSyntax) -> SyntaxVisitorContinueKind { visitImpl(node) }
@@ -665,7 +699,12 @@ final class EntityVisitor: SyntaxVisitor {
 
             guard macroName != fileMacro else { return .visitChildren }
 
-            if let list = cl.elements?.as(CodeBlockItemListSyntax.self) {
+#if swift(>=5.8)
+            let list = cl.elements?.as(CodeBlockItemListSyntax.self)
+#else
+            let list = cl.elements.as(CodeBlockItemListSyntax.self)
+#endif
+            if let list = list {
                 for el in list {
                     if let importItem = el.item.as(ImportDeclSyntax.self) {
                         let key = macroName
@@ -826,6 +865,36 @@ extension Trivia {
 extension FunctionSignatureSyntax {
     var asyncOrReasyncKeyword: TokenSyntax? {
         return nil
+    }
+}
+#endif
+
+#if swift(>=5.8)
+extension InitializerDeclSyntax {
+    var throwsOrRethrowsKeyword: TokenSyntax? {
+        signature.throwsOrRethrowsKeyword
+    }
+}
+#endif
+
+#if swift(>=5.8)
+extension InitializerDeclSyntax {
+    var throwsOrRethrowsKeyword: TokenSyntax? {
+        signature.throwsOrRethrowsKeyword
+    }
+}
+#endif
+
+#if swift(>=5.8)
+extension InitializerDeclSyntax {
+    var parameterList: FunctionParameterListSyntax {
+        signature.input.parameterList
+    }
+}
+#else
+extension InitializerDeclSyntax {
+    var parameterList: FunctionParameterListSyntax {
+        parameters.parameterList
     }
 }
 #endif
