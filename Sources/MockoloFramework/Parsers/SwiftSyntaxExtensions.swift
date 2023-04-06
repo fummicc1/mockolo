@@ -879,14 +879,6 @@ extension InitializerDeclSyntax {
 
 #if swift(>=5.8)
 extension InitializerDeclSyntax {
-    var throwsOrRethrowsKeyword: TokenSyntax? {
-        signature.throwsOrRethrowsKeyword
-    }
-}
-#endif
-
-#if swift(>=5.8)
-extension InitializerDeclSyntax {
     var parameterList: FunctionParameterListSyntax {
         signature.input.parameterList
     }
