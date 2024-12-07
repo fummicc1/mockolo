@@ -248,6 +248,57 @@ func testMock() {
 }
 ```
 
+## Concurrency-safe mocks
+
+Mockolo supports generating concurrency-safe mocks.
+
+When generating mocks conforming to Actor protocol, Mockolo will generate an actor and properties / methods are actor-isolated which leads to concurrency-safe testing.
+
+For example, P.swift contains:
+
+```swift
+/// @mockable
+public protocol P: Actor {
+    func f(arg: String)
+}
+```
+
+Running ```./mockolo -srcs P.swift -d ./OutputMocks.swift ``` will output:
+
+```swift
+public actor PMock: P {
+    public init() { }
+
+
+    public private(set) var fCallCount = 0
+    public var fArgValues = [String]()
+    public var fHandler: ((String) -> ())?
+    public func f(arg: String) {
+        fCallCount += 1
+        fArgValues.append(arg)
+        if let fHandler = fHandler {
+            fHandler(arg)
+        }
+
+    }
+}
+```
+
+The above mock can now be used in a test as follows:
+
+```swift
+import Testing
+
+@Test
+func foo() async throws {
+    let mock = PMock()
+    let foo = Foo(mock: mock)
+    await foo.f(arg: "foo")
+    #expect(await mock.fArgValues == ["foo"])
+}
+
+```
+
 ## Arguments
 
 A list of override arguments can be passed in (delimited by a semicolon) to the annotation to set var types, typealiases, module names, etc.
