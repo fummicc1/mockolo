@@ -1,0 +1,22 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:mockolo}",
+            "name": "Debug mockolo",
+            "program": "${workspaceFolder:mockolo}/.build/debug/mockolo",
+            "preLaunchTask": "swift: Build Debug mockolo"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:mockolo}",
+            "name": "Release mockolo",
+            "program": "${workspaceFolder:mockolo}/.build/release/mockolo",
+            "preLaunchTask": "swift: Build Release mockolo"
+        }
+    ]
+}
