@@ -148,8 +148,20 @@ public func generate(sourceDirs: [String],
     
     signpost_begin(name: "Render models")
     log("Render models with templates...", level: .info)
+    // Collect top-level conditional blocks (one per `#if` seen at file scope
+    // in any parsed source) so the renderer can wrap generated mocks in the
+    // matching `#if`/`#elseif`/`#else`/`#endif` structure.
+    var conditionalBlocks: [ConditionalImportBlock] = []
+    for (_, importContents) in pathToImportsMap {
+        for content in importContents {
+            if case .conditional(let block) = content {
+                conditionalBlocks.append(block)
+            }
+        }
+    }
     renderTemplates(
         entities: resolvedEntities,
+        conditionalBlocks: conditionalBlocks,
         arguments: .init(
             useTemplateFunc: useTemplateFunc,
             allowSetCallCount: allowSetCallCount,

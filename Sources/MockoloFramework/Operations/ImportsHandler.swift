@@ -94,6 +94,14 @@ private func renderImportContents(
             }
             simpleImports.append(`import`)
         case .conditional(let block):
+            // Skip conditional blocks that carry no imports at all — for
+            // example a `#if os(iOS) / protocol P / #endif` block whose only
+            // children are `@mockable` entities. Those blocks are picked up by
+            // `TemplateRenderer` (which owns `#if` wrapping around mocks) and
+            // must not emit an empty `#if ... #endif` header from the imports
+            // section.
+            guard containsAnyImport(block) else { continue }
+
             // First output accumulated simple imports
             resolveAccumulatedSimpleImports()
 
@@ -118,6 +126,26 @@ private func renderImportContents(
     resolveAccumulatedSimpleImports()
 
     return clauseLines.joined(separator: "\n")
+}
+
+/// Recursively checks whether a conditional block contains at least one
+/// `import` declaration in any of its clauses (including through nested
+/// blocks). Used to suppress emission of entity-only `#if` blocks in the
+/// imports section, since those are handled by `TemplateRenderer` instead.
+private func containsAnyImport(_ block: ConditionalImportBlock) -> Bool {
+    for clause in block.clauses {
+        for content in clause.contents {
+            switch content {
+            case .simple:
+                return true
+            case .conditional(let nested):
+                if containsAnyImport(nested) {
+                    return true
+                }
+            }
+        }
+    }
+    return false
 }
 
 private func visitModuleName(_ contents: [ImportContent]) -> [String] {

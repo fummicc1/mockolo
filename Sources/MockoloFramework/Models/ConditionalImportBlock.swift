@@ -20,12 +20,19 @@ indirect enum ImportContent {
     case conditional(ConditionalImportBlock)
 }
 
-/// Represents a conditional import block (#if/#elseif/#else/#endif)
+/// Represents a conditional compilation block (#if/#elseif/#else/#endif)
+/// at file scope. A clause owns both the imports declared in it and the
+/// `@mockable` entities declared in it, forming a compositional tree that
+/// mirrors the `IfConfigDeclSyntax` AST.
 struct ConditionalImportBlock {
-    /// Represents a single clause in a conditional import block
+    /// Represents a single clause in a conditional block
     struct Clause {
         var type: IfClauseType
         var contents: [ImportContent]
+        /// Top-level entities (protocols/classes) declared directly in this clause.
+        /// Nested `#if` blocks containing entities are represented via
+        /// `contents` (as `.conditional(...)`) so the tree structure is preserved.
+        var entities: [Entity]
     }
 
     let clauses: [Clause]

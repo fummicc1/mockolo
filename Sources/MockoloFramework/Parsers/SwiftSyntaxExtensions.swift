@@ -735,10 +735,7 @@ final class EntityVisitor: SyntaxVisitor {
     }
 
     override func visit(_ node: ProtocolDeclSyntax) -> SyntaxVisitorContinueKind {
-        let metadata = node.annotationMetadata(with: annotation)
-        if let ent = Entity.node(with: node, filepath: path, isPrivate: node.isPrivate, isFinal: false, metadata: metadata, processed: false) {
-            entities.append(ent)
-        }
+        _ = makeProtocolEntity(node)
         return .skipChildren
     }
 
@@ -751,20 +748,44 @@ final class EntityVisitor: SyntaxVisitor {
     }
 
     override func visit(_ node: ClassDeclSyntax) -> SyntaxVisitorContinueKind {
+        _ = makeClassEntity(node)
+        return node.genericParameterClause != nil ? .skipChildren : .visitChildren
+    }
+
+    /// Builds an `Entity` for a protocol declaration and appends it to the flat
+    /// `entities` list used by the resolution pipeline. Returns the entity so
+    /// callers parsing `#if` blocks can also store it in the tree.
+    @discardableResult
+    private func makeProtocolEntity(_ node: ProtocolDeclSyntax) -> Entity? {
+        let metadata = node.annotationMetadata(with: annotation)
+        guard let ent = Entity.node(with: node, filepath: path, isPrivate: node.isPrivate, isFinal: false, metadata: metadata, processed: false) else {
+            return nil
+        }
+        entities.append(ent)
+        return ent
+    }
+
+    /// Builds an `Entity` for a class declaration and appends it to the flat
+    /// `entities` list. Returns the entity so callers parsing `#if` blocks can
+    /// also store it in the tree.
+    @discardableResult
+    private func makeClassEntity(_ node: ClassDeclSyntax) -> Entity? {
         if scanAsMockfile || node.nameText.hasSuffix("Mock") {
             // this mock class node must be public else wouldn't have compiled before
-            if let ent = Entity.node(with: node, filepath: path, isPrivate: node.isPrivate, isFinal: false, metadata: nil, processed: true) {
-                entities.append(ent)
+            guard let ent = Entity.node(with: node, filepath: path, isPrivate: node.isPrivate, isFinal: false, metadata: nil, processed: true) else {
+                return nil
             }
+            entities.append(ent)
+            return ent
         } else {
-            if declType == .classType || declType == .all {
-                let metadata = node.annotationMetadata(with: annotation)
-                if let ent = Entity.node(with: node, filepath: path, isPrivate: node.isPrivate, isFinal: node.isFinal, metadata: metadata, processed: false) {
-                    entities.append(ent)
-                }
+            guard declType == .classType || declType == .all else { return nil }
+            let metadata = node.annotationMetadata(with: annotation)
+            guard let ent = Entity.node(with: node, filepath: path, isPrivate: node.isPrivate, isFinal: node.isFinal, metadata: metadata, processed: false) else {
+                return nil
             }
+            entities.append(ent)
+            return ent
         }
-        return node.genericParameterClause != nil ? .skipChildren : .visitChildren
     }
 
     override func visit(_ node: ActorDeclSyntax) -> SyntaxVisitorContinueKind {
@@ -786,13 +807,19 @@ final class EntityVisitor: SyntaxVisitor {
             return .visitChildren
         }
 
-        // Parse conditional import block recursively
+        // Parse a top-level #if block into a compositional tree that owns both
+        // imports and `@mockable` entities. Entities are also appended to the
+        // flat `entities` list (inside `makeProtocolEntity` / `makeClassEntity`)
+        // so the existing resolution pipeline keeps working unchanged.
         let block = parseIfConfigDecl(node)
         imports.append(.conditional(block))
         return .skipChildren
     }
 
-    /// Recursively parses an IfConfigDeclSyntax into a ConditionalImportBlock
+    /// Recursively parses an `IfConfigDeclSyntax` into a `ConditionalImportBlock`.
+    /// Each clause owns its imports (`contents`) and its top-level entities
+    /// (`entities`). Nested `#if` blocks are represented via `.conditional` in
+    /// `contents`, preserving arbitrary nesting depth.
     private func parseIfConfigDecl(_ node: IfConfigDeclSyntax) -> ConditionalImportBlock {
         var clauseList = [ConditionalImportBlock.Clause]()
 
@@ -802,6 +829,7 @@ final class EntityVisitor: SyntaxVisitor {
             }
 
             var contents = [ImportContent]()
+            var clauseEntities = [Entity]()
             if let list = cl.elements?.as(CodeBlockItemListSyntax.self) {
                 for el in list {
                     if let importItem = el.item.as(ImportDeclSyntax.self) {
@@ -809,8 +837,16 @@ final class EntityVisitor: SyntaxVisitor {
                         if let imp = Import(line: importItem.trimmedDescription) {
                             contents.append(.simple(imp))
                         }
+                    } else if let protocolItem = el.item.as(ProtocolDeclSyntax.self) {
+                        if let ent = makeProtocolEntity(protocolItem) {
+                            clauseEntities.append(ent)
+                        }
+                    } else if let classItem = el.item.as(ClassDeclSyntax.self) {
+                        if let ent = makeClassEntity(classItem) {
+                            clauseEntities.append(ent)
+                        }
                     } else if let nested = el.item.as(IfConfigDeclSyntax.self) {
-                        // Nested #if block (recursive)
+                        // Nested #if block (recursive) — preserves imports and entities
                         let nestedBlock = parseIfConfigDecl(nested)
                         contents.append(.conditional(nestedBlock))
                     }
@@ -819,7 +855,8 @@ final class EntityVisitor: SyntaxVisitor {
 
             clauseList.append(ConditionalImportBlock.Clause(
                 type: clauseType,
-                contents: contents
+                contents: contents,
+                entities: clauseEntities
             ))
         }
 
