@@ -30,7 +30,7 @@ class SourceParser {
     /// @param completion:The block to be executed on completion
     func parseProcessedDecls(_ paths: [String],
                              fileMacro: String?,
-                             completion: @escaping ([Entity], ImportMap?) -> ()) {
+                             completion: @escaping ([Entity], TopLevelDeclMap?) -> ()) {
         scan(paths) { (path, lock) in
             self.generateASTs(path, annotation: "", fileMacro: fileMacro, declType: .classType, scanAsMockfile: true, lock: lock, completion: completion)
         }
@@ -49,7 +49,7 @@ class SourceParser {
                     annotation: String,
                     fileMacro: String?,
                     declType: FindTargetDeclType,
-                    completion: @escaping ([Entity], ImportMap?) -> ()) {
+                    completion: @escaping ([Entity], TopLevelDeclMap?) -> ()) {
 
         guard !paths.isEmpty else { return }
         scan(paths, isDirectory: isDirs) { (path, lock) in
@@ -70,7 +70,7 @@ class SourceParser {
                               declType: FindTargetDeclType,
                               scanAsMockfile: Bool = false,
                               lock: NSLock?,
-                              completion: @escaping ([Entity], ImportMap?) -> ()) {
+                              completion: @escaping ([Entity], TopLevelDeclMap?) -> ()) {
 
         guard path.shouldParse(with: exclusionSuffixes) else { return }
 
@@ -86,17 +86,13 @@ class SourceParser {
             }
         }
 
-        var results = [Entity]()
         let node = Parser.parse(path)
         let treeVisitor = EntityVisitor(path, annotation: annotation, fileMacro: fileMacro, declType: declType, scanAsMockfile: scanAsMockfile)
         treeVisitor.walk(node)
-        let ret = treeVisitor.entities
-        results.append(contentsOf: ret)
-        let importMap = treeVisitor.imports
 
         lock?.lock()
         defer {lock?.unlock()}
-        completion(results, [path: importMap])
+        completion(treeVisitor.flatEntities, [path: treeVisitor.topLevelDecls])
     }
 
     private func containsDecl(_ decl: Data?, in path: String) -> Bool {

@@ -56,21 +56,21 @@ public func generate(sourceDirs: [String],
     var parentMocksByInheritedType = [String: Entity]()
     var protocolMap = [String: Entity]()
     var annotatedProtocolMap = [String: Entity]()
-    var pathToImportsMap = ImportMap()
+    var pathToDeclsMap = TopLevelDeclMap()
     var relevantPaths = [String]()
 
     signpost_begin(name: "Process input")
     let t0 = CFAbsoluteTimeGetCurrent()
     log("Process input mock files...", level: .info)
     if let mockFilePaths = mockFilePaths, !mockFilePaths.isEmpty {
-        parser.parseProcessedDecls(mockFilePaths, fileMacro: macro) { (elements, imports) in
+        parser.parseProcessedDecls(mockFilePaths, fileMacro: macro) { (elements, declsMap) in
                                     elements.forEach { element in
                                         parentMocks[element.entityNode.nameText] = element
                                     }
-                                    
-                                    if let imports = imports {
-                                        for (path, importMap) in imports {
-                                            pathToImportsMap[path] = importMap
+
+                                    if let declsMap = declsMap {
+                                        for (path, decls) in declsMap {
+                                            pathToDeclsMap[path] = decls
                                         }
                                     }
         }
@@ -94,16 +94,16 @@ public func generate(sourceDirs: [String],
                       exclusionSuffixes: exclusionSuffixes,
                       annotation: annotation,
                       fileMacro: macro,
-                      declType: declType) { (elements, imports) in
+                      declType: declType) { (elements, declsMap) in
                         elements.forEach { element in
                             protocolMap[element.entityNode.nameText] = element
                             if element.isAnnotated {
                                 annotatedProtocolMap[element.entityNode.nameText] = element
                             }
                         }
-                        if let imports = imports {
-                            for (path, importMap) in imports {
-                                pathToImportsMap[path] = importMap
+                        if let declsMap = declsMap {
+                            for (path, decls) in declsMap {
+                                pathToDeclsMap[path] = decls
                             }
                         }
     }
@@ -148,8 +148,14 @@ public func generate(sourceDirs: [String],
     
     signpost_begin(name: "Render models")
     log("Render models with templates...", level: .info)
+    let resolvedByName = Dictionary(
+        resolvedEntities.map { ($0.key, $0) },
+        uniquingKeysWith: { lhs, _ in lhs }
+    )
+    let relevantDeclsMap = pathToDeclsMap.filter { relevantPaths.contains($0.key) }
     renderTemplates(
-        entities: resolvedEntities,
+        declMap: relevantDeclsMap,
+        resolvedByName: resolvedByName,
         arguments: .init(
             useTemplateFunc: useTemplateFunc,
             allowSetCallCount: allowSetCallCount,
@@ -163,13 +169,13 @@ public func generate(sourceDirs: [String],
     signpost_end(name: "Render models")
     let t4 = CFAbsoluteTimeGetCurrent()
     log("Took", t4-t3, level: .verbose)
-     
+
     signpost_begin(name: "Write results")
     log("Write the mock results and import lines to", outputFilePath, level: .info)
 
     let needsConcurrencyHelpers = resolvedEntities.contains { $0.requiresSendable }
 
-    let imports = handleImports(pathToImportsMap: pathToImportsMap,
+    let imports = handleImports(pathToDeclsMap: pathToDeclsMap,
                                 customImports: customImports + (needsConcurrencyHelpers ? ["Foundation"] : []),
                                 excludeImports: excludeImports,
                                 testableImports: testableImports,
