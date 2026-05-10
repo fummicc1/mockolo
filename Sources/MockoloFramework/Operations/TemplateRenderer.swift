@@ -14,20 +14,78 @@
 //  limitations under the License.
 //
 
-/// Renders models with templates for output
-
-func renderTemplates(entities: [ResolvedEntity],
+func renderTemplates(declMap: TopLevelDeclMap,
+                     resolvedByName: [String: ResolvedEntity],
                      arguments: GenerationArguments,
                      completion: @escaping (String, Int64) -> ()) {
-    scan(entities) { (resolvedEntity, lock) in
-        let mockModel = resolvedEntity.model()
-        if let mockString = mockModel.render(
-            context: .init(),
-            arguments: arguments
-        ), !mockString.isEmpty {
+    scan(Array(declMap.values)) { (decls, lock) in
+        for decl in decls {
+            // An `#if` block is emitted as a single candidate keyed by the
+            // block's own offset. Splitting inner entities into individual
+            // candidates would let unrelated standalone entities sort into
+            // the middle of the block and break the `#if/#endif` pairing.
+            guard let (rendered, offset) = render(decl, resolvedByName: resolvedByName, arguments: arguments) else { continue }
             lock?.lock()
-            completion(mockString, mockModel.offset)
+            completion(rendered, offset)
             lock?.unlock()
         }
     }
+}
+
+private func render(_ decl: TopLevelDecl,
+                    resolvedByName: [String: ResolvedEntity],
+                    arguments: GenerationArguments) -> (String, Int64)? {
+    switch decl {
+    case .import:
+        // Imports flow through `handleImports`; the entity renderer ignores
+        // them so the same source-order tree can drive both pipelines.
+        return nil
+    case .entity(let entity):
+        return renderEntity(entity, resolvedByName: resolvedByName, arguments: arguments)
+    case .ifConfig(let block):
+        return renderIfConfig(block, resolvedByName: resolvedByName, arguments: arguments)
+    }
+}
+
+private func renderEntity(_ entity: Entity,
+                          resolvedByName: [String: ResolvedEntity],
+                          arguments: GenerationArguments) -> (String, Int64)? {
+    // A protocol that's syntactically present but not annotated has no
+    // `ResolvedEntity`; returning nil drops it from the output (and lets
+    // an enclosing `#if` clause drop with it if it was the only content).
+    guard let resolved = resolvedByName[entity.entityNode.nameText] else { return nil }
+    let mockModel = resolved.model()
+    guard let mockString = mockModel.render(context: .init(), arguments: arguments),
+          !mockString.isEmpty else { return nil }
+    return (mockString, mockModel.offset)
+}
+
+private func renderIfConfig(_ block: IfConfigBlock,
+                            resolvedByName: [String: ResolvedEntity],
+                            arguments: GenerationArguments) -> (String, Int64)? {
+    var lines: [String] = []
+    var hasOutput = false
+
+    for clause in block.clauses {
+        let body = clause.decls.compactMap { render($0, resolvedByName: resolvedByName, arguments: arguments)?.0 }
+        // Skip the directive entirely when the clause body is empty; a
+        // dangling `#elseif`/`#else` with no content would be syntactically
+        // valid but visually confusing in the generated output.
+        guard !body.isEmpty else { continue }
+        hasOutput = true
+
+        switch clause.condition {
+        case .if(let condition):
+            lines.append("#if \(condition)")
+        case .elseif(let condition):
+            lines.append("#elseif \(condition)")
+        case .else:
+            lines.append("#else")
+        }
+        lines.append(contentsOf: body)
+    }
+
+    guard hasOutput else { return nil }
+    lines.append("#endif")
+    return (lines.joined(separator: "\n"), block.offset)
 }

@@ -727,13 +727,17 @@ extension TypeAliasDeclSyntax {
 }
 
 final class EntityVisitor: SyntaxVisitor {
-    var entities: [Entity] = []
-    var imports: [ImportContent] = []
+    var topLevelDecls: [TopLevelDecl] = []
     let annotation: String
     let fileMacro: String
     let path: String
     let declType: FindTargetDeclType
     let scanAsMockfile: Bool
+
+    var flatEntities: [Entity] {
+        return topLevelDecls.flatEntities
+    }
+
     init(_ path: String, annotation: String = "", fileMacro: String?, declType: FindTargetDeclType, scanAsMockfile: Bool = false) {
         self.annotation = annotation
         self.fileMacro = fileMacro ?? ""
@@ -744,9 +748,8 @@ final class EntityVisitor: SyntaxVisitor {
     }
 
     override func visit(_ node: ProtocolDeclSyntax) -> SyntaxVisitorContinueKind {
-        let metadata = node.annotationMetadata(with: annotation)
-        if let ent = Entity.node(with: node, filepath: path, isPrivate: node.isPrivate, isFinal: false, metadata: metadata, processed: false) {
-            entities.append(ent)
+        if let ent = makeProtocolEntity(node) {
+            topLevelDecls.append(.entity(ent))
         }
         return .skipChildren
     }
@@ -760,18 +763,8 @@ final class EntityVisitor: SyntaxVisitor {
     }
 
     override func visit(_ node: ClassDeclSyntax) -> SyntaxVisitorContinueKind {
-        if scanAsMockfile || node.nameText.hasSuffix("Mock") {
-            // this mock class node must be public else wouldn't have compiled before
-            if let ent = Entity.node(with: node, filepath: path, isPrivate: node.isPrivate, isFinal: false, metadata: nil, processed: true) {
-                entities.append(ent)
-            }
-        } else {
-            if declType == .classType || declType == .all {
-                let metadata = node.annotationMetadata(with: annotation)
-                if let ent = Entity.node(with: node, filepath: path, isPrivate: node.isPrivate, isFinal: node.isFinal, metadata: metadata, processed: false) {
-                    entities.append(ent)
-                }
-            }
+        if let ent = makeClassEntity(node) {
+            topLevelDecls.append(.entity(ent))
         }
         return node.genericParameterClause != nil ? .skipChildren : .visitChildren
     }
@@ -781,64 +774,83 @@ final class EntityVisitor: SyntaxVisitor {
     }
 
     override func visit(_ node: ImportDeclSyntax) -> SyntaxVisitorContinueKind {
-        // Top-level import (not inside #if)
         if let `import` = Import(line: node.trimmedDescription) {
-            imports.append(.simple(`import`))
+            topLevelDecls.append(.import(`import`))
         }
         return .skipChildren
     }
 
     override func visit(_ node: IfConfigDeclSyntax) -> SyntaxVisitorContinueKind {
-        // Check if this is a file macro that should be ignored
-        if let firstCondition = node.clauses.first?.condition?.trimmedDescription,
+        // The fileMacro wrapper (e.g. `#if MOCK ... #endif` used by tests and
+        // generated mocks themselves) must be transparent: its children are
+        // the real top-level decls and we don't want to model the wrapper as
+        // an `#if` block in the output.
+        if !fileMacro.isEmpty,
+           let firstCondition = node.clauses.first?.condition?.trimmedDescription,
            firstCondition == fileMacro {
             return .visitChildren
         }
 
-        // Parse conditional import block recursively
-        let block = parseIfConfigDecl(node)
-        imports.append(.conditional(block))
+        let block = parseIfConfigBlock(node)
+        topLevelDecls.append(.ifConfig(block))
         return .skipChildren
     }
 
-    /// Recursively parses an IfConfigDeclSyntax into a ConditionalImportBlock
-    private func parseIfConfigDecl(_ node: IfConfigDeclSyntax) -> ConditionalImportBlock {
-        var clauseList = [ConditionalImportBlock.Clause]()
+    private func parseIfConfigBlock(_ node: IfConfigDeclSyntax) -> IfConfigBlock {
+        var clauseList = [IfConfigBlock.Clause]()
 
         for cl in node.clauses {
-            guard let clauseType = IfClauseType(cl) else {
-                continue
-            }
+            guard let condition = IfClauseType(cl) else { continue }
 
-            var contents = [ImportContent]()
+            var decls = [TopLevelDecl]()
             if let list = cl.elements?.as(CodeBlockItemListSyntax.self) {
                 for el in list {
                     if let importItem = el.item.as(ImportDeclSyntax.self) {
-                        // Simple import
                         if let imp = Import(line: importItem.trimmedDescription) {
-                            contents.append(.simple(imp))
+                            decls.append(.import(imp))
+                        }
+                    } else if let protocolDecl = el.item.as(ProtocolDeclSyntax.self) {
+                        if let ent = makeProtocolEntity(protocolDecl) {
+                            decls.append(.entity(ent))
+                        }
+                    } else if let classDecl = el.item.as(ClassDeclSyntax.self) {
+                        if let ent = makeClassEntity(classDecl) {
+                            decls.append(.entity(ent))
                         }
                     } else if let nested = el.item.as(IfConfigDeclSyntax.self) {
-                        // Nested #if block (recursive)
-                        let nestedBlock = parseIfConfigDecl(nested)
-                        contents.append(.conditional(nestedBlock))
+                        decls.append(.ifConfig(parseIfConfigBlock(nested)))
                     }
                 }
             }
 
-            clauseList.append(ConditionalImportBlock.Clause(
-                type: clauseType,
-                contents: contents
-            ))
+            clauseList.append(IfConfigBlock.Clause(condition: condition, decls: decls))
         }
 
-        return ConditionalImportBlock(clauses: clauseList, offset: node.offset)
+        return IfConfigBlock(clauses: clauseList, offset: node.offset)
+    }
+
+    private func makeProtocolEntity(_ node: ProtocolDeclSyntax) -> Entity? {
+        let metadata = node.annotationMetadata(with: annotation)
+        return Entity.node(with: node, filepath: path, isPrivate: node.isPrivate, isFinal: false, metadata: metadata, processed: false)
+    }
+
+    private func makeClassEntity(_ node: ClassDeclSyntax) -> Entity? {
+        if scanAsMockfile || node.nameText.hasSuffix("Mock") {
+            // A previously-generated mock class is treated as `processed`
+            // so resolution merges its members instead of regenerating them.
+            // It also doesn't need annotation metadata or ACL gating because
+            // it wouldn't have compiled in the first place if it weren't public.
+            return Entity.node(with: node, filepath: path, isPrivate: node.isPrivate, isFinal: false, metadata: nil, processed: true)
+        }
+        guard declType == .classType || declType == .all else { return nil }
+        let metadata = node.annotationMetadata(with: annotation)
+        return Entity.node(with: node, filepath: path, isPrivate: node.isPrivate, isFinal: node.isFinal, metadata: metadata, processed: false)
     }
 
     override func visit(_ node: InitializerDeclSyntax) -> SyntaxVisitorContinueKind {
         return .skipChildren
     }
-    
+
     override func visit(_ node: FunctionDeclSyntax) -> SyntaxVisitorContinueKind {
         return .skipChildren
     }

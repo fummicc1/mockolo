@@ -16,45 +16,46 @@
 
 import Algorithms
 
-func handleImports(pathToImportsMap: ImportMap,
+func handleImports(pathToDeclsMap: TopLevelDeclMap,
                    customImports: [String]?,
                    excludeImports: [String]?,
                    testableImports: [String]?,
                    relevantPaths: [String]) -> String {
     var topLevelImports: [Import] = []
-    var conditionalBlocks: [ConditionalImportBlock] = []
+    var conditionalBlocks: [IfConfigBlock] = []
 
-    // 1. Collect imports from all relevant files
-    for (path, parsedImports) in pathToImportsMap {
+    for (path, decls) in pathToDeclsMap {
         guard relevantPaths.contains(path) else { continue }
 
-        for `import` in parsedImports {
-            switch `import` {
-            case .simple(let simple):
-                topLevelImports.append(simple)
-            case .conditional(let conditional):
-                conditionalBlocks.append(conditional)
+        for decl in decls {
+            switch decl {
+            case .import(let imp):
+                topLevelImports.append(imp)
+            case .ifConfig(let block):
+                conditionalBlocks.append(block)
+            case .entity:
+                // Entities are rendered by `renderTemplates`, not here.
+                continue
             }
         }
     }
 
-    // 2. Sort conditional blocks by offset (file appearance order)
+    // Conditional import blocks are emitted in source-appearance order so the
+    // generated output matches what a human reader would expect.
     conditionalBlocks.sort(by: { $0.offset < $1.offset })
 
-    // 3. Add custom imports
     if let customImports {
         topLevelImports.append(contentsOf: customImports.map {
             Import(moduleName: $0)
         })
     }
 
-    var contents: [ImportContent] {
-        topLevelImports.map { .simple($0) } + conditionalBlocks.map { .conditional($0) }
+    var decls: [TopLevelDecl] {
+        topLevelImports.map { .import($0) } + conditionalBlocks.map { .ifConfig($0) }
     }
 
-    // 4. Add testable imports if the import does not exist
     if let testableImports {
-        let usedNames = Set(visitModuleName(contents))
+        let usedNames = Set(visitModuleName(decls))
         for name in testableImports {
             if !usedNames.contains(name) {
                 topLevelImports.append(Import(moduleName: name).asTestable)
@@ -62,15 +63,15 @@ func handleImports(pathToImportsMap: ImportMap,
         }
     }
 
-    return renderImportContents(
-        contents,
+    return renderImportDecls(
+        decls,
         excludeImports: excludeImports,
         testableImports: testableImports
     )
 }
 
-private func renderImportContents(
-    _ contents: [ImportContent],
+private func renderImportDecls(
+    _ decls: [TopLevelDecl],
     excludeImports: [String]?,
     testableImports: [String]?
 ) -> String {
@@ -83,9 +84,9 @@ private func renderImportContents(
         }
     }
 
-    for content in contents {
-        switch content {
-        case .simple(var `import`):
+    for decl in decls {
+        switch decl {
+        case .import(var `import`):
             if let excludeImports, excludeImports.contains(`import`.moduleName) {
                 continue
             }
@@ -93,26 +94,18 @@ private func renderImportContents(
                 `import` = `import`.asTestable
             }
             simpleImports.append(`import`)
-        case .conditional(let block):
-            // First output accumulated simple imports
+        case .ifConfig(let block):
+            // Flush any pending plain imports first so they don't end up
+            // inside the conditional block we're about to emit.
             resolveAccumulatedSimpleImports()
-
-            var result = ""
-            for clause in block.clauses {
-                switch clause.type {
-                case .if(let condition):
-                    result += "#if \(condition)\n"
-                case .elseif(let condition):
-                    result += "#elseif \(condition)\n"
-                case .else:
-                    result += "#else\n"
-                }
-                // Recursively render nested block
-                result += renderImportContents(clause.contents, excludeImports: excludeImports, testableImports: testableImports)
-                result += "\n"
+            if let rendered = renderIfConfigImports(block, excludeImports: excludeImports, testableImports: testableImports) {
+                clauseLines.append(rendered)
             }
-            result += "#endif"
-            clauseLines.append(result)
+        case .entity:
+            // Entity decls don't contribute to import output. Skipping them
+            // here keeps the renderer for `#if` blocks symmetric across the
+            // import and entity paths.
+            continue
         }
     }
     resolveAccumulatedSimpleImports()
@@ -120,13 +113,47 @@ private func renderImportContents(
     return clauseLines.joined(separator: "\n")
 }
 
-private func visitModuleName(_ contents: [ImportContent]) -> [String] {
-    return contents.flatMap { content in
-        switch content {
-        case .simple(let `import`):
-            return [`import`.moduleName]
-        case .conditional(let block):
-            return visitModuleName(block.clauses.flatMap(\.contents))
+/// Renders an `#if` block's imports. Returns `nil` if no clause has any
+/// import output, so a block that only wraps entities (or only wraps
+/// excluded imports) doesn't leak an empty `#if/#endif` skeleton.
+private func renderIfConfigImports(
+    _ block: IfConfigBlock,
+    excludeImports: [String]?,
+    testableImports: [String]?
+) -> String? {
+    var lines: [String] = []
+    var hasOutput = false
+
+    for clause in block.clauses {
+        let body = renderImportDecls(clause.decls, excludeImports: excludeImports, testableImports: testableImports)
+        guard !body.isEmpty else { continue }
+        hasOutput = true
+
+        switch clause.condition {
+        case .if(let condition):
+            lines.append("#if \(condition)")
+        case .elseif(let condition):
+            lines.append("#elseif \(condition)")
+        case .else:
+            lines.append("#else")
+        }
+        lines.append(body)
+    }
+
+    guard hasOutput else { return nil }
+    lines.append("#endif")
+    return lines.joined(separator: "\n")
+}
+
+private func visitModuleName(_ decls: [TopLevelDecl]) -> [String] {
+    return decls.flatMap { decl -> [String] in
+        switch decl {
+        case .import(let imp):
+            return [imp.moduleName]
+        case .ifConfig(let block):
+            return visitModuleName(block.clauses.flatMap(\.decls))
+        case .entity:
+            return []
         }
     }
 }
